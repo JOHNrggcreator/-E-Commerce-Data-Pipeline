@@ -1,0 +1,126 @@
+import os
+import random
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+from sqlalchemy import create_engine
+import streamlit as st
+import plotly.express as px
+def generate_data():
+    os.makedirs("data", exist_ok=True)
+    random.seed(42)
+    np.random.seed(42)
+    customers = []
+    for i in range(1, 201):
+        customers.append({
+            "customer_id": i,
+            "name": f"Customer_{i}",
+            "email": f"customer{i}@email.com",
+            "join_date": (datetime.now() - timedelta(days=random.randint(30, 365))).date()
+        })
+    pd.DataFrame(customers).to_csv("data/customers.csv", index=False)
+    categories = ["Electronics", "Clothing", "Books", "Home", "Sports", "Beauty"]
+    products = []
+    pid = 1
+    for c in categories:
+        for n in range(6):
+            products.append({
+                "product_id": pid,
+                "name": f"{c}_Item_{n+1}",
+                "category": c,
+                "price": round(random.uniform(10, 500), 2)
+            })
+            pid += 1
+    pd.DataFrame(products).to_csv("data/products.csv", index=False)
+    orders, items = [], []
+    order_id = 1
+    item_id = 1
+    for _ in range(500):
+        cust = random.randint(1, 200)
+        date = (datetime.now() - timedelta(days=random.randint(0, 90))).date()
+        num_items = random.randint(1, 5)
+        total = 0
+        sampled = random.sample(products, num_items)
+        for p in sampled:
+            qty = random.randint(1, 3)
+            total += p["price"] * qty
+            items.append({
+                "order_item_id": item_id,
+                "order_id": order_id,
+                "product_id": p["product_id"],
+                "quantity": qty,
+                "unit_price": p["price"]
+            })
+            item_id += 1
+        orders.append({
+            "order_id": order_id,
+            "customer_id": cust,
+            "order_date": date,
+            "total": round(total, 2)
+        })
+        order_id += 1
+    pd.DataFrame(orders).to_csv("data/orders.csv", index=False)
+    pd.DataFrame(items).to_csv("data/order_items.csv", index=False)
+DB_URL = "sqlite:///ecommerce.db"
+engine = create_engine(DB_URL, echo=False)
+def etl_pipeline():
+    dfs = {
+        "customers": pd.read_csv("data/customers.csv"),
+        "products": pd.read_csv("data/products.csv"),
+        "orders": pd.read_csv("data/orders.csv"),
+        "order_items": pd.read_csv("data/order_items.csv")
+    }
+    dfs["orders"]["order_date"] = pd.to_datetime(dfs["orders"]["order_date"])
+    for tbl in ["products", "orders", "order_items"]:
+        for col in dfs[tbl].select_dtypes(include="object"):
+            dfs[tbl][col] = pd.to_numeric(dfs[tbl][col], errors="ignore")
+    for df in dfs.values():
+        df.dropna(inplace=True)
+    with engine.begin() as conn:
+        for name, df in dfs.items():
+            df.to_sql(name, conn, if_exists="replace", index=False)
+def analytics_summary():
+    con = engine.connect()
+    total_rev = con.execute("SELECT SUM(total) FROM orders").scalar() or 0
+    total_orders = con.execute("SELECT COUNT(*) FROM orders").scalar()
+    total_customers = con.execute("SELECT COUNT(*) FROM customers").scalar()
+    avg_order = con.execute("SELECT AVG(total) FROM orders").scalar() or 0
+    print(f"Total Revenue   : ${total_rev:,.2f}")
+    print(f"Total Orders    : {total_orders}")
+    print(f"Total Customers : {total_customers}")
+    print(f"Avg Order Value : ${avg_order:,.2f}")
+    con.close()
+def run_dashboard():
+    st.set_page_config(page_title="E-Commerce Dashboard", layout="wide")
+    st.title("🛍️ E-Commerce Analytics Dashboard")
+    con = engine.connect()
+    cust = con.execute("SELECT COUNT(*) FROM customers").scalar()
+    prod = con.execute("SELECT COUNT(*) FROM products").scalar()
+    ordr = con.execute("SELECT COUNT(*) FROM orders").scalar()
+    rev = con.execute("SELECT SUM(total) FROM orders").scalar()
+    con.close()
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Customers", f"{cust}")
+    col2.metric("Products", f"{prod}")
+    col3.metric("Orders", f"{ordr}")
+    col4.metric("Revenue", f"${rev:,.2f}")
+    st.markdown("---")
+    sales = pd.read_sql("SELECT order_date, SUM(total) AS revenue FROM orders GROUP BY order_date ORDER BY order_date", engine)
+    fig1 = px.line(sales, x="order_date", y="revenue", title="Daily Sales Revenue")
+    st.plotly_chart(fig1, use_container_width=True)
+    top_prod = pd.read_sql("SELECT p.name, SUM(oi.quantity) AS sold FROM order_items oi JOIN products p ON oi.product_id=p.product_id GROUP BY p.product_id ORDER BY sold DESC LIMIT 10", engine)
+    fig2 = px.bar(top_prod, x="sold", y="name", orientation="h", title="Top 10 Products")
+    st.plotly_chart(fig2, use_container_width=True)
+    top_cust = pd.read_sql("SELECT c.name, SUM(o.total) AS spent FROM orders o JOIN customers c ON o.customer_id=c.customer_id GROUP BY c.customer_id ORDER BY spent DESC LIMIT 10", engine)
+    fig3 = px.bar(top_cust, x="spent", y="name", orientation="h", title="Top 10 Customers")
+    st.plotly_chart(fig3, use_container_width=True)
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "dashboard":
+        run_dashboard()
+    else:
+        generate_data()
+        etl_pipeline()
+        analytics_summary()
+        print("Run streamlit run run.py dashboard to launch the dashboard")
+
